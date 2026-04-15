@@ -1,102 +1,129 @@
 #include "Int128.hpp"
 #include <algorithm>
 
-__int128 Int128::to_native() const {
-    return ( (__int128)high << 64 ) | low;
+Int128::Int128() : high_(0), low_(0) {}
+
+Int128::Int128(int64_t value) {
+    low_ = static_cast<uint64_t>(value);
+    high_ = (value < 0) ? -1 : 0;
 }
 
-Int128 Int128::from_native(__int128 v) {
+Int128::Int128(std::string_view str) : high_(0), low_(0) {
+    if (str.empty()) return;
+    bool negative = false;
+    if (str[0] == '-') {
+        negative = true;
+        str.remove_prefix(1);
+    }
+    for (char c : str) {
+        *this *= Int128(10);
+        *this += Int128(static_cast<int64_t>(c - '0'));
+    }
+    if (negative) *this = -(*this);
+}
+
+Int128::operator int64_t() const { return static_cast<int64_t>(low_); }
+
+Int128::operator double() const {
+    // 2^64
+    const double two64 = 18446744073709551616.0;
+    return static_cast<double>(high_) * two64 + static_cast<double>(low_);
+}
+
+Int128 Int128::operator-() const {
     Int128 res;
-    res.high = (int64_t)(v >> 64);
-    res.low = (uint64_t)v;
+    res.low_ = ~low_ + 1;
+    res.high_ = ~high_ + (res.low_ == 0 ? 1 : 0);
     return res;
 }
 
-Int128::Int128() : high(0), low(0) {}
-
-Int128::Int128(int64_t v) {
-    __int128 tmp = v;
-    high = (int64_t)(tmp >> 64);
-    low = (uint64_t)tmp;
+bool Int128::operator<(const Int128& rhs) const {
+    if (high_ != rhs.high_) return high_ < rhs.high_;
+    return low_ < rhs.low_;
 }
 
-Int128::Int128(int64_t h, uint64_t l) : high(h), low(l) {}
-
-Int128::Int128(std::string_view s) {
-    __int128 val = 0;
-    bool neg = false;
-
-    if (!s.empty() && s[0] == '-') {
-        neg = true;
-        s.remove_prefix(1);
-    }
-
-    for (char c : s) {
-        val = val * 10 + (c - '0');
-    }
-
-    if (neg) val = -val;
-
-    high = (int64_t)(val >> 64);
-    low = (uint64_t)val;
+bool Int128::operator==(const Int128& rhs) const {
+    return high_ == rhs.high_ && low_ == rhs.low_;
 }
 
-Int128::operator int64_t() const {
-    return (int64_t)to_native();
-}
-
-Int128::operator double() const {
-    return (double)to_native();
-}
+bool Int128::operator!=(const Int128& rhs) const { return !(*this == rhs); }
 
 Int128& Int128::operator+=(const Int128& rhs) {
-    *this = from_native(to_native() + rhs.to_native());
+    uint64_t next_low = low_ + rhs.low_;
+    int64_t next_high = high_ + rhs.high_ + (next_low < low_ ? 1 : 0);
+    low_ = next_low;
+    high_ = next_high;
     return *this;
 }
 
 Int128& Int128::operator-=(const Int128& rhs) {
-    *this = from_native(to_native() - rhs.to_native());
-    return *this;
+    return *this += (-rhs);
 }
 
 Int128& Int128::operator*=(const Int128& rhs) {
-    *this = from_native(to_native() * rhs.to_native());
+    bool neg = (high_ < 0) ^ (rhs.high_ < 0);
+    Int128 a = (high_ < 0) ? -*this : *this;
+    Int128 b = (rhs.high_ < 0) ? -rhs : rhs;
+
+    uint64_t a_h = a.low_ >> 32, a_l = a.low_ & 0xFFFFFFFF;
+    uint64_t b_h = b.low_ >> 32, b_l = b.low_ & 0xFFFFFFFF;
+
+    uint64_t ll = a_l * b_l;
+    uint64_t lh = a_l * b_h;
+    uint64_t hl = a_h * b_l;
+    uint64_t hh = a_h * b_h;
+
+    uint64_t mid = lh + hl;
+    uint64_t carry = (mid < lh ? 1ULL << 32 : 0);
+    
+    Int128 res;
+    res.low_ = ll + (mid << 32);
+    if (res.low_ < ll) carry++;
+
+    res.high_ = hh + (mid >> 32) + carry + (a.low_ * b.high_) + (a.high_ * b.low_);
+
+    *this = neg ? -res : res;
     return *this;
 }
 
 Int128& Int128::operator/=(const Int128& rhs) {
-    *this = from_native(to_native() / rhs.to_native());
+    if (rhs == Int128(0)) return *this;
+    bool neg = (high_ < 0) ^ (rhs.high_ < 0);
+    Int128 n = (high_ < 0) ? -*this : *this;
+    Int128 d = (rhs.high_ < 0) ? -rhs : rhs;
+
+    Int128 quot(0), rem(0);
+    for (int i = 127; i >= 0; --i) {
+        rem += rem; 
+        if ((i >= 64 && (n.high_ & (1LL << (i - 64)))) || (i < 64 && (n.low_ & (1ULL << i)))) {
+            rem.low_ |= 1;
+        }
+        if (!(rem < d)) {
+            rem -= d;
+            if (i >= 64) quot.high_ |= (1LL << (i - 64));
+            else quot.low_ |= (1ULL << i);
+        }
+    }
+    *this = neg ? -quot : quot;
     return *this;
 }
 
-Int128 Int128::operator-() const {
-    return from_native(-to_native());
-}
-
-bool Int128::operator==(const Int128& rhs) const {
-    return high == rhs.high && low == rhs.low;
-}
-
-bool Int128::operator!=(const Int128& rhs) const {
-    return !(*this == rhs);
-}
-
 std::string Int128::str() const {
-    __int128 val = to_native();
+    if (high_ == 0 && low_ == 0) return "0";
 
-    if (val == 0) return "0";
-
-    if (val == ((__int128)1 << 127)) {
+    if (high_ == static_cast<int64_t>(1ULL << 63) && low_ == 0) {
         return "-170141183460469231731687303715884105728";
     }
-    
-    bool neg = val < 0;
-    if (neg) val = -val;
 
+    bool neg = high_ < 0;
+    Int128 temp = neg ? -*this : *this;
     std::string s;
-    while (val > 0) {
-        s.push_back('0' + val % 10);
-        val /= 10;
+
+    while (temp != Int128(0)) {
+        Int128 before = temp;
+        temp /= Int128(10);
+        Int128 digit = before - (temp * Int128(10));
+        s.push_back(static_cast<char>('0' + digit.low_));
     }
 
     if (neg) s.push_back('-');
@@ -104,11 +131,11 @@ std::string Int128::str() const {
     return s;
 }
 
-std::ostream& operator<<(std::ostream& os, const Int128& v) {
-    return os << v.str();
+std::ostream& operator<<(std::ostream& os, const Int128& value) {
+    return os << value.str();
 }
 
-Int128 operator+(Int128 a, const Int128& b) { return a += b; }
-Int128 operator-(Int128 a, const Int128& b) { return a -= b; }
-Int128 operator*(Int128 a, const Int128& b) { return a *= b; }
-Int128 operator/(Int128 a, const Int128& b) { return a /= b; }
+Int128 operator+(Int128 lhs, const Int128& rhs) { return lhs += rhs; }
+Int128 operator-(Int128 lhs, const Int128& rhs) { return lhs -= rhs; }
+Int128 operator*(Int128 lhs, const Int128& rhs) { return lhs *= rhs; }
+Int128 operator/(Int128 lhs, const Int128& rhs) { return lhs /= rhs; }
