@@ -25,7 +25,6 @@ Int128::Int128(std::string_view str) : high_(0), low_(0) {
 Int128::operator int64_t() const { return static_cast<int64_t>(low_); }
 
 Int128::operator double() const {
-    // 2^64
     const double two64 = 18446744073709551616.0;
     return static_cast<double>(high_) * two64 + static_cast<double>(low_);
 }
